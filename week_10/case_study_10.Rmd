@@ -1,7 +1,153 @@
 ---
-title: "Case Study 10"
-author: Your Name
-date: August 1, 2020
+title: "Satellite Remote Sensing"
+author: Jay M. Cooney
+date: November 12, 2020
 output: github_document
 ---
- 
+
+```{r libraries, echo=T,results='hide',warning=F,message=F}
+library(raster)
+library(rasterVis)
+library(rgdal)
+library(ggmap)
+library(tidyverse)
+library(knitr)
+library(ncdf4)
+library(sf)
+```
+
+#Completed working with groupmates Collin, Marko, Bowei
+```{r data load,echo=T,results='hide',warning=F,message=F}
+dir.create("data",showWarnings = F) #create a folder to hold the data
+lulc_url="https://github.com/adammwilson/DataScienceData/blob/master/inst/extdata/appeears/MCD12Q1.051_aid0001.nc?raw=true"
+lst_url="https://github.com/adammwilson/DataScienceData/blob/master/inst/extdata/appeears/MOD11A2.006_aid0001.nc?raw=true"
+# download them
+download.file(lulc_url,destfile="data/MCD12Q1.051_aid0001.nc", mode="wb")
+download.file(lst_url,destfile="data/MOD11A2.006_aid0001.nc", mode="wb")
+lulc=stack("data/MCD12Q1.051_aid0001.nc",varname="Land_Cover_Type_1")
+lst=stack("data/MOD11A2.006_aid0001.nc",varname="LST_Day_1km")
+```
+
+```{r lulc_1year}
+lulc=lulc[[13]]
+plot(lulc)
+  Land_Cover_Type_1 = c(
+    Water = 0, 
+    `Evergreen Needleleaf forest` = 1, 
+    `Evergreen Broadleaf forest` = 2,
+    `Deciduous Needleleaf forest` = 3, 
+    `Deciduous Broadleaf forest` = 4,
+    `Mixed forest` = 5, 
+    `Closed shrublands` = 6,
+    `Open shrublands` = 7,
+    `Woody savannas` = 8, 
+    Savannas = 9,
+    Grasslands = 10,
+    `Permanent wetlands` = 11, 
+    Croplands = 12,
+    `Urban & built-up` = 13,
+    `Cropland/Natural vegetation mosaic` = 14, 
+    `Snow & ice` = 15,
+    `Barren/Sparsely vegetated` = 16, 
+    Unclassified = 254,
+    NoDataFill = 255)
+  lcd=data.frame(
+  ID=Land_Cover_Type_1,
+  landcover=names(Land_Cover_Type_1),
+  col=c("#000080","#008000","#00FF00", "#99CC00","#99FF99", "#339966", "#993366", "#FFCC99", "#CCFFCC", "#FFCC00", "#FF9900", "#006699", "#FFFF00", "#FF0000", "#999966", "#FFFFFF", "#808080", "#000000", "#000000"),
+  stringsAsFactors = F)
+# colors from https://lpdaac.usgs.gov/about/news_archive/modisterra_land_cover_types_yearly_l3_global_005deg_cmg_mod12c1
+kable(head(lcd))
+```
+
+``` {r convertrast}
+# convert to raster
+lulc=as.factor(lulc)
+# update the RAT using left join
+levels(lulc)=left_join(levels(lulc)[[1]],lcd)
+```
+
+```{r ggplot,warning=F}
+
+gplot(lulc)+
+  geom_raster(aes(fill=as.factor(value)))+
+  scale_fill_manual(values=levels(lulc)[[1]]$col,
+                    labels=levels(lulc)[[1]]$landcover,
+                    name="Landcover Type")+
+  coord_equal()+
+  theme(legend.position = "right")+
+  guides(fill=guide_legend(ncol=1,byrow=TRUE))
+```
+
+```{r plotall}
+plot(lst[[1:12]])
+offs(lst)=-273.15
+plot(lst[[1:10]])
+```
+
+```{r Date_conversion,message=F,warning=F}
+tdates=names(lst)%>%
+  sub(pattern="X",replacement="")%>%
+  as.Date("%Y.%m.%d")
+names(lst)=1:nlayers(lst)
+lst=setZ(lst,tdates)
+```
+
+```{r Timeseries,echo=F,message=F,warning=F,comment=NA}
+lw=SpatialPoints(data.frame(x= -78.791547,y=43.007211))
+projection(lw)="+proj=longlat"
+spTransform(lw, CRSobj = proj4string(lst))
+p1=t(raster::extract(lst,lw,buffer=1000,fun=mean,na.rm=T))
+p1.dates=getZ(lst)
+t_series = cbind.data.frame(p1,p1.dates)
+names(t_series)=c("MLST","Date")
+ggplot(t_series,aes(x=Date,y=MLST)) +
+  geom_point() +
+  geom_smooth(method="loess",span=.02) +
+  ylab(expression(paste("Monthly Mean Land Surface Temperature",~degree,"C",sep="")))
+```
+
+```{r convert months}
+tmonth=as.numeric(format(getZ(lst),"%m"))
+lst_month=stackApply(x =lst,fun = mean,na.rm=T,indices=tmonth)
+names(lst_month)=month.name
+gplot(lst_month)+
+      geom_raster(aes(fill=value)) +
+  scale_fill_gradient(low='blue',high='red') +
+  facet_wrap(~variable) +
+  theme(axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank())
+kable(cellStats(lst_month,mean))
+```
+
+``` {r violinplot_cleaning}
+lulc2=resample(lulc,lst,method='ngb')
+lcds1=cbind.data.frame(values(lst_month),ID=values(lulc2[[1]])) 
+testa= lcds1 %>% 
+  gather(key='month',value = 'value',-ID) %>%
+  mutate(ID=as.numeric(ID),month=factor(month,
+                                        levels=month.name,
+                                        ordered=T))
+testb=left_join(lcds1,lcd)
+testc = testb %>%
+  filter(landcover%in%c("Urban & built-up","Deciduous Broadleaf forest"))
+```
+
+```{r final_plot}
+testd=reshape2::melt(testc, id.vars="landcover",
+               measure.vars=c("January","February","March",
+                              "April","May","June","July","August",
+                              "September","October","November",
+                              "December"))
+ggplot(testd,aes(x=variable,y=value))+
+  geom_jitter(width=.3)+
+  geom_violin(color='red',alpha=.4)+
+  ylab(expression(paste("Monthly Mean Land Surface Temperature (",
+                        ~degree,"C)",sep="")))+
+  xlab("Month")+
+  theme(axis.text.x = element_text(angle=65,vjust=.65))+
+  ggtitle("Land Surface Temperature in Urban Forest")+
+  facet_wrap(~landcover)
+```
